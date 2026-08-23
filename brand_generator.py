@@ -361,7 +361,8 @@ def save_result(output_dir, result_dict):
 
     - output_dir이 문자열("./output")이든 Path 객체든 모두 받는다
     - 폴더가 없으면 만든다 (중간 폴더까지 포함)
-    - 한글이 \uXXXX로 깨지지 않게 ensure_ascii=False 로 저장한다
+    - 한글이 유니코드 이스케이프(역슬래시 u + 숫자)로 깨지지 않게
+      ensure_ascii=False 로 저장한다
     """
     # 문자열로 들어와도 Path로 바꿔서 폴더/파일 다루기 쉽게 만든다
     output_path = Path(output_dir)
