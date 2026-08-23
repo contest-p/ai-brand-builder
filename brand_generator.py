@@ -14,84 +14,84 @@ from pathlib import Path  # 폴더/파일 경로를 다루기 쉽게 해주는 �
 
 
 # ---------------------------------------------------------------------------
-# 1) .env에서 API 키 읽기
+# 1) .env 파일 확인 후 환경변수로 넣기
+#    (어떤 키 이름을 쓸지는 여기서 정하지 않는다. 팀원이 각자 os.environ에서 꺼낸다)
 # ---------------------------------------------------------------------------
 def load_env_file(env_path=".env"):
     """
-    .env 파일을 한 줄씩 읽어서 KEY=VALUE 형태를
-    파이썬 환경변수(os.environ)에 넣습니다.
+    .env 파일을 한 줄씩 읽어서 KEY=VALUE 를 os.environ 에 넣습니다.
 
-    예: OPENAI_API_KEY=sk-xxxxx
+    반환:
+      - 파일이 없으면 None
+      - 있으면 KEY=VALUE 줄의 개수 (0일 수도 있음)
     """
     path = Path(env_path)
 
-    # .env 파일 자체가 없으면 False를 반환 → 호출한 쪽에서 안내 후 종료
     if not path.exists():
-        return False
+        return None
 
-    # 파일을 UTF-8로 연다 (한글 주석이 있어도 깨지지 않게)
+    pair_count = 0  # KEY=VALUE 로 인정한 줄 개수
+
     with path.open("r", encoding="utf-8") as f:
         for line in f:
-            line = line.strip()  # 앞뒤 공백/줄바꿈 제거
+            line = line.strip()
 
-            # 빈 줄이나 #으로 시작하는 주석 줄은 건너뛴다
+            # 빈 줄, 주석(# ...) 은 키가 아니므로 건너뛴다
             if not line or line.startswith("#"):
                 continue
 
-            # KEY=VALUE 형태가 아니면 건너뛴다
             if "=" not in line:
                 continue
 
-            # 처음 나오는 = 기준으로 이름과 값을 나눈다
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip()
 
-            # 값이 "..." 또는 '...'로 감싸여 있으면 따옴표를 벗긴다
+            # "값" 또는 '값' 이면 따옴표 제거
             if (value.startswith('"') and value.endswith('"')) or (
                 value.startswith("'") and value.endswith("'")
             ):
                 value = value[1:-1]
 
-            # 이미 환경변수에 값이 있으면 덮어쓰지 않는다
-            # (터미널에서 미리 넣은 키를 우선한다)
-            if key and key not in os.environ:
+            # 이름과 값이 둘 다 있어야 KEY=VALUE 한 줄로 센다
+            if not key or not value:
+                continue
+
+            pair_count += 1
+
+            # 터미널에 이미 같은 이름이 있으면 덮어쓰지 않는다
+            if key not in os.environ:
                 os.environ[key] = value
 
-    return True
+    return pair_count
 
 
 def get_api_key():
     """
-    .env를 읽고 API 키를 가져옵니다.
-    파일이 없거나 키가 비어 있으면 안내 메시지를 출력하고 프로그램을 종료합니다.
-    """
-    env_loaded = load_env_file(".env")
+    .env 가 있는지, 그 안에 KEY=값 줄이 최소 하나 있는지만 확인합니다.
+    특정 키 이름(OPENAI_API_KEY 등)은 검사하지 않습니다.
 
-    if not env_loaded:
-        print(" '.env' 파일을 찾지 못했습니다.")
-        print("프로젝트 폴더에 .env 파일을 만들고, 아래처럼 API 키를 넣어 주세요.")
+    실제 키는 각 팀원 함수에서 예: os.environ.get("내가_쓰는_이름") 으로 가져가면 됩니다.
+    파일이 없거나 유효한 줄이 하나도 없으면 안내 후 프로그램을 종료합니다.
+    """
+    pair_count = load_env_file(".env")
+
+    if pair_count is None:
+        print(".env 파일을 찾지 못했습니다.")
+        print("프로젝트 폴더에 .env 파일을 만들고, 아래처럼 한 줄 이상 넣어 주세요.")
         print()
-        print("    OPENAI_API_KEY=여기에_키를_붙여넣기")
+        print("    키이름=값")
         print()
+        print("키 이름은 각자 사용하는 API에 맞게 정하면 됩니다.")
         print("키는 외부에 공유하지 마세요. .env는 git에 올리지 않는 것이 안전합니다.")
         sys.exit(1)
 
-    # 여러 이름을 허용한다. 앞에서부터 찾아서 값이 있는 것을 쓴다.
-    api_key = (
-        os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("API_KEY")
-        or ""
-    ).strip()
-
-    if not api_key:
-        print(".env 파일은 있지만, API 키가 비어 있습니다.")
-        print("OPENAI_API_KEY= 뒤에 실제 키를 넣고 다시 실행해 주세요.")
+    if pair_count < 1:
+        print(".env 파일은 있지만, KEY=값 형태의 줄이 없습니다.")
+        print("빈 줄과 # 주석을 제외하고, 이름=값 이 최소 한 줄은 있어야 합니다.")
         print()
-        print("    예) OPENAI_API_KEY=sk-...")
+        print("    예) 키이름=붙여넣을_값")
         sys.exit(1)
-
-    return api_key
 
 
 # ---------------------------------------------------------------------------
@@ -386,11 +386,8 @@ def save_result(output_dir, result_dict):
 # 7) 프로그램 시작점 (여기부터 실행됨)
 # ---------------------------------------------------------------------------
 def main():
-    # (1) API 키가 있어야 나중에 생성 함수에서 쓸 수 있다
-    api_key = get_api_key()
-    # 지금은 생성 함수가 비어 있어서 키를 쓰지는 않는다.
-    # 나중에 함수를 채울 때 api_key를 넘기거나, os.environ에서 읽으면 된다.
-    _ = api_key  # "변수를 안 써서 경고 나지 않게" 하는 표시 (실제 동작에는 영향 없음)
+    # (1) .env를 환경변수로 올린다. 키 이름은 팀원이 각자 os.environ에서 꺼낸다.
+    get_api_key()
 
     # (2) 경로 입력 → JSON 읽기
     brief_path, output_dir = ask_paths()
