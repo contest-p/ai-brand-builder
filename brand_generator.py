@@ -1,0 +1,435 @@
+"""
+brand_generator.py
+터미널에서 브리프 JSON을 받아, 5단계로 브랜드 결과물을 만들고
+마지막에 brand_result.json으로 저장하는 CLI 프로그램입니다.
+
+지금은 전체 흐름만 완성되어 있고,
+실제 AI 생성 함수 5개는 pass(빈 구현) 상태입니다.
+"""
+
+import json  # JSON 파일을 읽고, 결과를 JSON으로 저장할 때 사용
+import os  # 환경변수(API 키)와 파일 경로를 다룰 때 사용
+import sys  # 프로그램 종료(sys.exit)에 사용
+from pathlib import Path  # 폴더/파일 경로를 다루기 쉽게 해주는 도구
+
+
+# ---------------------------------------------------------------------------
+# 1) .env에서 API 키 읽기
+# ---------------------------------------------------------------------------
+def load_env_file(env_path=".env"):
+    """
+    .env 파일을 한 줄씩 읽어서 KEY=VALUE 형태를
+    파이썬 환경변수(os.environ)에 넣습니다.
+
+    예: OPENAI_API_KEY=sk-xxxxx
+    """
+    path = Path(env_path)
+
+    # .env 파일 자체가 없으면 False를 반환 → 호출한 쪽에서 안내 후 종료
+    if not path.exists():
+        return False
+
+    # 파일을 UTF-8로 연다 (한글 주석이 있어도 깨지지 않게)
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()  # 앞뒤 공백/줄바꿈 제거
+
+            # 빈 줄이나 #으로 시작하는 주석 줄은 건너뛴다
+            if not line or line.startswith("#"):
+                continue
+
+            # KEY=VALUE 형태가 아니면 건너뛴다
+            if "=" not in line:
+                continue
+
+            # 처음 나오는 = 기준으로 이름과 값을 나눈다
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+
+            # 값이 "..." 또는 '...'로 감싸여 있으면 따옴표를 벗긴다
+            if (value.startswith('"') and value.endswith('"')) or (
+                value.startswith("'") and value.endswith("'")
+            ):
+                value = value[1:-1]
+
+            # 이미 환경변수에 값이 있으면 덮어쓰지 않는다
+            # (터미널에서 미리 넣은 키를 우선한다)
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+    return True
+
+
+def get_api_key():
+    """
+    .env를 읽고 API 키를 가져옵니다.
+    파일이 없거나 키가 비어 있으면 안내 메시지를 출력하고 프로그램을 종료합니다.
+    """
+    env_loaded = load_env_file(".env")
+
+    if not env_loaded:
+        print(" '.env' 파일을 찾지 못했습니다.")
+        print("프로젝트 폴더에 .env 파일을 만들고, 아래처럼 API 키를 넣어 주세요.")
+        print()
+        print("    OPENAI_API_KEY=여기에_키를_붙여넣기")
+        print()
+        print("키는 외부에 공유하지 마세요. .env는 git에 올리지 않는 것이 안전합니다.")
+        sys.exit(1)
+
+    # 여러 이름을 허용한다. 앞에서부터 찾아서 값이 있는 것을 쓴다.
+    api_key = (
+        os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("API_KEY")
+        or ""
+    ).strip()
+
+    if not api_key:
+        print(".env 파일은 있지만, API 키가 비어 있습니다.")
+        print("OPENAI_API_KEY= 뒤에 실제 키를 넣고 다시 실행해 주세요.")
+        print()
+        print("    예) OPENAI_API_KEY=sk-...")
+        sys.exit(1)
+
+    return api_key
+
+
+# ---------------------------------------------------------------------------
+# 2) 사용자 입력 / 브리프 JSON 읽기
+# ---------------------------------------------------------------------------
+REQUIRED_BRIEF_FIELDS = ("industry", "target", "keywords")  # 반드시 있어야 하는 키
+OPTIONAL_BRIEF_FIELDS = ("tone", "competitors", "notes")  # 없어도 되는 키
+
+
+def ask_paths():
+    """
+    터미널에서 두 가지 경로를 입력받습니다.
+    - 브리프 JSON 경로: 필수
+    - 출력 폴더: 엔터만 치면 ./output
+    """
+    print("=== AI 브랜드 제너레이터 ===")
+    print()
+
+    brief_path = input("브리프 JSON 파일 경로를 입력하세요: ").strip()
+    if not brief_path:
+        print("브리프 JSON 경로는 필수입니다. 프로그램을 종료합니다.")
+        sys.exit(1)
+
+    output_dir = input("출력 폴더 경로를 입력하세요 (엔터 = ./output): ").strip()
+    if not output_dir:
+        output_dir = "./output"  # 기본값
+
+    return Path(brief_path), Path(output_dir)
+
+
+def load_brief(brief_path):
+    """
+    JSON 파일을 읽어 딕셔너리로 반환합니다.
+    파일이 없거나 JSON이 깨졌거나, 필수 필드가 없으면 안내 후 종료합니다.
+    """
+    if not brief_path.exists():
+        print(f"파일을 찾을 수 없습니다: {brief_path}")
+        sys.exit(1)
+
+    try:
+        with brief_path.open("r", encoding="utf-8") as f:
+            brief = json.load(f)
+    except json.JSONDecodeError:
+        print("JSON 형식이 올바르지 않습니다. 쉼표, 따옴표, 중괄호를 확인해 주세요.")
+        sys.exit(1)
+
+    if not isinstance(brief, dict):
+        print("브리프 JSON의 최상위는 객체(중괄호 {})여야 합니다.")
+        sys.exit(1)
+
+    # 필수 필드가 모두 있는지 확인
+    missing = [field for field in REQUIRED_BRIEF_FIELDS if not brief.get(field)]
+    if missing:
+        print("브리프에 필수 필드가 없습니다:", ", ".join(missing))
+        print("필수: industry, target, keywords")
+        print("선택: tone, competitors, notes")
+        sys.exit(1)
+
+    return brief
+
+
+# ---------------------------------------------------------------------------
+# 3) 팀원 공통: API 호출을 안전하게 감싸는 함수
+#    (네이밍/슬로건/스토리/컬러/로고 담당이 각자 함수 안에서 그대로 복사해 쓰면 됨)
+# ---------------------------------------------------------------------------
+# 함수 이름만으로도 "어느 단계인지"를 추정하기 위한 표
+# (step_name을 직접 넘기면 이 표보다 그게 우선한다)
+_STEP_NAME_BY_FUNC = {
+    "generate_naming": "네이밍",
+    "generate_slogan": "슬로건",
+    "generate_story": "스토리",
+    "generate_color_palette": "컬러",
+    "generate_logo": "로고",
+}
+
+
+def _looks_like_api_key_error(error):
+    """
+    OpenAI / Anthropic / HTTP 등 라이브러리가 달라도
+    '키가 없거나 잘못됐다'는 신호를 최대한 같은 방식으로 알아챈다.
+
+    라이브러리를 import하지 않고, 에러 객체에 있는 정보만 본다.
+    (팀원이 openai를 쓰든 requests를 쓰든 이 함수는 그대로 동작한다)
+    """
+    # HTTP 상태 코드가 있으면 401(인증 실패), 403(권한 없음)을 키 문제로 본다
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(error, "status", None)
+    if status in (401, 403):
+        return True
+
+    # OpenAI 등은 error.code / error.type 에 invalid_api_key 같은 값을 넣는다
+    code = str(getattr(error, "code", "") or getattr(error, "type", "")).lower()
+    if "api_key" in code or "apikey" in code or code in ("invalid_api_key", "authentication_error"):
+        return True
+
+    # 클래스 이름: AuthenticationError, PermissionDeniedError, AuthError 등
+    class_name = type(error).__name__.lower()
+    if "auth" in class_name or "permission" in class_name:
+        return True
+
+    # 메시지 문구로 한 번 더 확인 (한국어/영어 모두)
+    message = str(error).lower()
+    key_hints = (
+        "api key",
+        "api_key",
+        "apikey",
+        "invalid api",
+        "incorrect api",
+        "unauthorized",
+        "authentication",
+        "invalid_api_key",
+        "incorrect api key",
+        "no api key",
+        "missing api",
+        "api 키",
+        "인증",
+    )
+    return any(hint in message for hint in key_hints)
+
+
+def _guess_step_name(func, step_name):
+    """단계 이름이 없으면 함수 이름에서 알아낸다."""
+    if step_name:
+        return step_name
+
+    func_name = getattr(func, "__name__", "") or ""
+    if func_name in _STEP_NAME_BY_FUNC:
+        return _STEP_NAME_BY_FUNC[func_name]
+
+    # generate_naming → naming 처럼 접두어만 떼서 보여 준다
+    if func_name.startswith("generate_"):
+        return func_name[len("generate_"):]
+
+    return func_name or "API"
+
+
+def safe_api_call(func, *args, step_name=None, **kwargs):
+    """
+    어떤 함수든(API 호출, 내부 헬퍼 등) 받아서 실행하고,
+    실패해도 프로그램이 죽지 않게 막아 주는 공통 함수.
+
+    사용 예)
+        # 1) 내 함수 + 위치 인자
+        result = safe_api_call(generate_naming, brief)
+
+        # 2) 단계 이름을 직접 지정 (권장 — 메시지에 그대로 나옴)
+        result = safe_api_call(_ask_openai, brief, step_name="슬로건")
+
+        # 3) 키워드 인자도 그대로 전달
+        result = safe_api_call(
+            client.chat.completions.create,
+            model="gpt-4o-mini",
+            messages=messages,
+            step_name="네이밍",
+        )
+
+    반환:
+        성공 → func이 돌려준 값 그대로
+        실패 → None  (호출한 쪽에서 if result is None: 으로 처리하면 됨)
+
+    step_name은 키워드로만 넘긴다. 감싸는 함수의 인자 이름과 겹치지 않게
+    항상 step_name=... 형태로 쓴다.
+    """
+    label = _guess_step_name(func, step_name)
+
+    try:
+        # *args: 순서대로 넘기는 값  (예: brief)
+        # **kwargs: 이름 붙여 넘기는 값  (예: model="...")
+        # step_name은 위 정의에서 이미 빠져 있으므로 func에는 전달되지 않는다
+        return func(*args, **kwargs)
+    except Exception as error:
+        if _looks_like_api_key_error(error):
+            print("API 키를 확인해주세요")
+            return None
+
+        print(f"{label} 단계에서 오류가 발생했습니다: {error}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 4) 5단계 생성 함수 (지금은 뼈대만 — 내용은 나중에 채움)
+#    구현할 때: 실제 API 호출을 safe_api_call(...) 로 감싸면 된다
+# ---------------------------------------------------------------------------
+def generate_naming(brief):
+    """
+    입력: brief (딕셔너리) — industry, target, keywords 등
+    출력: 브랜드명 후보 리스트
+          각 항목은 이름과 의미를 담은 딕셔너리
+          예) [{"name": "루나", "meaning": "달처럼 부드러운 이미지"}, ...]
+
+    구현 예)
+        return safe_api_call(_call_naming_api, brief, step_name="네이밍")
+    """
+    pass
+
+
+def generate_slogan(brief):
+    """
+    입력: brief (딕셔너리)
+    출력: 슬로건 문자열 리스트
+          예) ["매일의 작은 빛", "당신 곁의 브랜드"]
+    """
+    pass
+
+
+def generate_story(brief):
+    """
+    입력: brief (딕셔너리)
+    출력: 브랜드 스토리 문자열 하나
+          예) "이 브랜드는 ..."
+    """
+    pass
+
+
+def generate_color_palette(brief):
+    """
+    입력: brief (딕셔너리)
+    출력: 컬러 팔레트 딕셔너리
+          예) {"main": "#1A2B3C", "sub": ["#AABBCC", "#DDEEFF"]}
+    """
+    pass
+
+
+def generate_logo(brief, naming_result, color_result):
+    """
+    입력:
+      - brief: 브리프 딕셔너리
+      - naming_result: generate_naming()이 만든 이름 후보 리스트
+      - color_result: generate_color_palette()가 만든 색상 딕셔너리
+    출력: 저장된 로고 이미지 파일 경로 리스트
+          예) ["./output/logo_1.png", "./output/logo_2.png"]
+    """
+    pass
+
+
+# ---------------------------------------------------------------------------
+# 5) 한 단계를 안전하게 실행 (실패해도 프로그램은 계속)
+# ---------------------------------------------------------------------------
+def run_step(step_number, total_steps, title, func, *args):
+    """
+    진행 메시지를 출력한 뒤 함수를 호출합니다.
+    에러가 나도 메시지를 찍고 None을 반환해서, 다음 단계로 넘어가게 합니다.
+
+    *args: 그 단계 함수에 넘겨줄 인자들
+           (예: brief, 또는 brief + naming_result + color_result)
+    """
+    print(f"[{step_number}/{total_steps}] {title} 생성 중...")
+
+    try:
+        result = func(*args)
+        return result
+    except Exception as error:
+        # Exception: 거의 모든 실행 중 오류를 잡는다
+        print(f"  → {title} 단계에서 오류가 났습니다: {error}")
+        print("  → 이 단계는 건너뛰고 다음 단계로 진행합니다.")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 6) 결과를 JSON 파일로 저장
+# ---------------------------------------------------------------------------
+def save_result(output_dir, result_dict):
+    """
+    5단계 결과를 모은 딕셔너리(result_dict)를
+    output_dir/brand_result.json 파일로 저장한다.
+
+    - output_dir이 문자열("./output")이든 Path 객체든 모두 받는다
+    - 폴더가 없으면 만든다 (중간 폴더까지 포함)
+    - 한글이 \uXXXX로 깨지지 않게 ensure_ascii=False 로 저장한다
+    """
+    # 문자열로 들어와도 Path로 바꿔서 폴더/파일 다루기 쉽게 만든다
+    output_path = Path(output_dir)
+
+    # parents=True: output/하위 처럼 중간 폴더도 같이 생성
+    # exist_ok=True: 이미 폴더가 있어도 에러 내지 않음
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    result_file = output_path / "brand_result.json"
+
+    # encoding="utf-8": 한글 파일로 저장
+    with result_file.open("w", encoding="utf-8") as f:
+        # ensure_ascii=False → 한글을 그대로 기록
+        # indent=2 → 들여써서 사람이 읽기 쉽게
+        json.dump(result_dict, f, ensure_ascii=False, indent=2)
+
+    print(f"결과가 {result_file}에 저장되었습니다")
+    return str(result_file)
+
+
+# ---------------------------------------------------------------------------
+# 7) 프로그램 시작점 (여기부터 실행됨)
+# ---------------------------------------------------------------------------
+def main():
+    # (1) API 키가 있어야 나중에 생성 함수에서 쓸 수 있다
+    api_key = get_api_key()
+    # 지금은 생성 함수가 비어 있어서 키를 쓰지는 않는다.
+    # 나중에 함수를 채울 때 api_key를 넘기거나, os.environ에서 읽으면 된다.
+    _ = api_key  # "변수를 안 써서 경고 나지 않게" 하는 표시 (실제 동작에는 영향 없음)
+
+    # (2) 경로 입력 → JSON 읽기
+    brief_path, output_dir = ask_paths()
+    brief = load_brief(brief_path)
+
+    print()
+    print("브리프를 읽었습니다. 5단계를 시작합니다.")
+    print()
+
+    # (3) 5단계를 순서대로 실행. 실패해도 다음으로 진행
+    naming_result = run_step(1, 5, "브랜드 네이밍", generate_naming, brief)
+    slogan_result = run_step(2, 5, "슬로건", generate_slogan, brief)
+    story_result = run_step(3, 5, "브랜드 스토리", generate_story, brief)
+    color_result = run_step(4, 5, "컬러 팔레트", generate_color_palette, brief)
+    logo_result = run_step(
+        5,
+        5,
+        "로고",
+        generate_logo,
+        brief,
+        naming_result,
+        color_result,
+    )
+
+    # (4) 모든 결과를 한 딕셔너리에 모은다
+    results = {
+        "brief": brief,  # 원본 브리프도 같이 남겨 두면 나중에 추적하기 쉽다
+        "naming": naming_result,  # 이름+의미 리스트 (실패 시 None)
+        "slogan": slogan_result,  # 슬로건 리스트
+        "story": story_result,  # 스토리 문자열
+        "color_palette": color_result,  # {"main": "#HEX", "sub": ["#HEX", "#HEX"]}
+        "logo_paths": logo_result,  # 저장된 이미지 경로 리스트
+    }
+
+    # (5) JSON으로 저장 (폴더가 없으면 save_result 안에서 생성)
+    save_result(output_dir, results)
+
+
+# 이 파일을 직접 실행했을 때만 main()을 호출한다
+# (다른 파일이 이 파일을 import 할 때는 자동 실행되지 않음)
+if __name__ == "__main__":
+    main()
