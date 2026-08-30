@@ -12,6 +12,8 @@ import os  # 환경변수(API 키)와 파일 경로를 다룰 때 사용
 import sys  # 프로그램 종료(sys.exit)에 사용
 from pathlib import Path  # 폴더/파일 경로를 다루기 쉽게 해주는 도구
 import openai
+import matplotlib.pyplot as plt  # 컬러 팔레트를 이미지로 그릴 때 사용
+import matplotlib.patches as patches  # 네모 박스(사각형)를 그릴 때 사용
 
 # ---------------------------------------------------------------------------
 # 1) .env 파일 확인 후 환경변수로 넣기
@@ -304,7 +306,7 @@ def generate_story(brief):
     출력: 브랜드 스토리 문자열 하나
     """
     client = openai.OpenAI()
-    
+
     response = client.chat.completions.create(
         model="gpt-5.4-mini",
         messages=[
@@ -313,6 +315,7 @@ def generate_story(brief):
         ]
     )
     return response.choices[0].message.content
+
 
 def generate_color_palette(brief):
     """
@@ -324,6 +327,95 @@ def generate_color_palette(brief):
         "main": "#87A96B",              # 세이지 그린
         "sub": ["#F5F5DC", "#A9D1E1"]   # 웜 베이지, 미스트 블루
     }
+
+
+def save_color_palette_image(color_dict, output_dir):
+    """
+    입력:
+      - color_dict: {"main": "#HEX", "sub": ["#HEX", "#HEX", ...]} 형태
+      - output_dir: 이미지를 저장할 폴더 (문자열 또는 Path 둘 다 가능)
+    출력: 저장된 이미지 파일 경로(문자열)
+
+    메인 컬러 1개 + 서브 컬러 여러 개를 가로로 나란히 놓인 네모 박스로
+    그리고, 각 박스 아래에 HEX 코드를 텍스트로 표시해서 PNG로 저장한다.
+    color_dict가 없거나(None) 형식이 이상하면 에러 메시지만 출력하고
+    None을 반환한다 (프로그램이 멈추지 않게).
+    """
+    # color_dict가 아예 없거나(이전 단계 실패) 딕셔너리가 아니면 건너뛴다
+    if not color_dict or not isinstance(color_dict, dict):
+        print("컬러 팔레트 정보가 없어 이미지를 만들 수 없습니다.")
+        return None
+
+    main_color = color_dict.get("main")
+    sub_colors = color_dict.get("sub", []) or []
+
+    if not main_color:
+        print("메인 컬러가 없어 이미지를 만들 수 없습니다.")
+        return None
+
+    # 메인 컬러 + 서브 컬러들을 한 리스트로 합치고, 어떤 게 메인인지 기억해둔다
+    all_colors = [main_color] + list(sub_colors)
+
+    # 박스 크기 설정: 메인 컬러 박스가 서브 컬러보다 살짝 더 크게
+    box_width = 2.0
+    main_box_height = 2.0
+    sub_box_height = 1.5
+
+    # 그림판(figure)과 좌표축(axes)을 하나 만든다
+    # figsize: 그림 전체 크기 (가로, 세로) 인치 단위
+    fig, ax = plt.subplots(figsize=(box_width * len(all_colors), 3))
+
+    for i, hex_color in enumerate(all_colors):
+        is_main = (i == 0)
+        box_height = main_box_height if is_main else sub_box_height
+
+        # 박스의 왼쪽 아래 좌표 (x, y)
+        x = i * box_width
+        y = 0
+
+        # 사각형(Rectangle) 그리기: (왼쪽아래 좌표, 가로길이, 세로길이, 색)
+        rect = patches.Rectangle(
+            (x, y),
+            box_width * 0.9,  # 박스 사이에 살짝 간격을 두기 위해 0.9배
+            box_height,
+            facecolor=hex_color,
+            edgecolor="black",
+            linewidth=1,
+        )
+        ax.add_patch(rect)
+
+        # 박스 아래에 HEX 코드 텍스트 표시
+        label = f"{hex_color}\n(메인)" if is_main else hex_color
+        ax.text(
+            x + (box_width * 0.9) / 2,   # 박스 가로 중앙
+            -0.3,                         # 박스 아래쪽
+            label,
+            ha="center",
+            va="top",
+            fontsize=10,
+        )
+
+    # 좌표축 범위를 박스들이 다 보이게 설정
+    ax.set_xlim(-0.2, box_width * len(all_colors))
+    ax.set_ylim(-1, main_box_height + 0.5)
+
+    # 눈금, 테두리선은 필요 없으니 다 꺼서 깔끔하게 만든다
+    ax.axis("off")
+    ax.set_title("Brand Color Palette", fontsize=14, pad=15)
+
+    # 저장할 폴더가 없으면 만든다
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    image_path = output_path / "color_palette.png"
+
+    # bbox_inches="tight": 여백을 딱 맞게 잘라서 저장
+    fig.savefig(image_path, bbox_inches="tight", dpi=150)
+    plt.close(fig)  # 메모리에 그림이 계속 쌓이지 않게 닫아준다
+
+    print(f"컬러 팔레트 이미지가 {image_path}에 저장되었습니다")
+    return str(image_path)
+
 
 def generate_logo(brief, naming_result, color_result):
     """
@@ -412,6 +504,12 @@ def main():
     slogan_result = run_step(2, 5, "슬로건", generate_slogan, brief)
     story_result = run_step(3, 5, "브랜드 스토리", generate_story, brief)
     color_result = run_step(4, 5, "컬러 팔레트", generate_color_palette, brief)
+
+    # (3-1) 컬러 팔레트를 이미지(PNG)로 저장 — 실패해도 다음 단계로 진행
+    color_palette_image_path = run_step(
+        "4b", 5, "컬러 팔레트 이미지 저장", save_color_palette_image, color_result, output_dir
+    )
+
     logo_result = run_step(
         5,
         5,
@@ -429,6 +527,7 @@ def main():
         "slogan": slogan_result,  # 슬로건 리스트
         "story": story_result,  # 스토리 문자열
         "color_palette": color_result,  # {"main": "#HEX", "sub": ["#HEX", "#HEX"]}
+        "color_palette_image": color_palette_image_path,  # 저장된 팔레트 이미지 경로
         "logo_paths": logo_result,  # 저장된 이미지 경로 리스트
     }
 
