@@ -11,7 +11,7 @@ import json  # JSON 파일을 읽고, 결과를 JSON으로 저장할 때 사용
 import os  # 환경변수(API 키)와 파일 경로를 다룰 때 사용
 import sys  # 프로그램 종료(sys.exit)에 사용
 from pathlib import Path  # 폴더/파일 경로를 다루기 쉽게 해주는 도구
-
+import openai
 
 # ---------------------------------------------------------------------------
 # 1) .env 파일 확인 후 환경변수로 넣기
@@ -244,7 +244,7 @@ def safe_api_call(func, *args, step_name=None, **kwargs):
         # 3) 키워드 인자도 그대로 전달
         result = safe_api_call(
             client.chat.completions.create,
-            model="gpt-4o-mini",
+            model="gpt-5.4-mini",
             messages=messages,
             step_name="네이밍",
         )
@@ -302,19 +302,34 @@ def generate_story(brief):
     """
     입력: brief (딕셔너리)
     출력: 브랜드 스토리 문자열 하나
-          예) "이 브랜드는 ..."
     """
-    pass
-
+    print("\n[1/5] 브랜드 스토리 생성 중...")
+    client = openai.OpenAI()
+    
+    response = client.chat.completions.create(
+        model="gpt-5.4-mini",
+        messages=[
+            {"role": "system", "content": "당신은 감성적인 화장품 브랜드 스토리텔러입니다. 아토피로 인한 '생존'의 선택에서, 환경과 나를 위한 '선호'의 가치로 전환되는 스토리를 280자 내외로 따뜻하게 작성해주세요."},
+            {"role": "user", "content": f"다음 기획안을 바탕으로 스토리를 써주세요:\n{brief}"}
+        ]
+    )
+    print("\n=== 🚨 서버 응답 확인 🚨 ===")
+    print(response)
+    print("==========================\n")
+    return response.choices[0].message.content
 
 def generate_color_palette(brief):
     """
     입력: brief (딕셔너리)
     출력: 컬러 팔레트 딕셔너리
-          예) {"main": "#1A2B3C", "sub": ["#AABBCC", "#DDEEFF"]}
     """
-    pass
-
+    print("\n[2/5] 브랜드 컬러 팔레트 생성 중...")
+    
+    # 우리가 팀에서 확정한 컬러 팔레트를 그대로 반환
+    return {
+        "main": "#87A96B",              # 세이지 그린
+        "sub": ["#F5F5DC", "#A9D1E1"]   # 웜 베이지, 미스트 블루
+    }
 
 def generate_logo(brief, naming_result, color_result):
     """
