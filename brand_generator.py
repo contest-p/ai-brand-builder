@@ -385,7 +385,7 @@ def save_color_palette_image(color_dict, output_dir):
         ax.add_patch(rect)
 
         # 박스 아래에 HEX 코드 텍스트 표시
-        label = f"{hex_color}\n(메인)" if is_main else hex_color
+        label = f"{hex_color}\n(Main)" if is_main else hex_color
         ax.text(
             x + (box_width * 0.9) / 2,   # 박스 가로 중앙
             -0.3,                         # 박스 아래쪽
