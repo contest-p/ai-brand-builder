@@ -303,7 +303,6 @@ def generate_story(brief):
     입력: brief (딕셔너리)
     출력: 브랜드 스토리 문자열 하나
     """
-    print("\n[1/5] 브랜드 스토리 생성 중...")
     client = openai.OpenAI()
     
     response = client.chat.completions.create(
@@ -313,9 +312,6 @@ def generate_story(brief):
             {"role": "user", "content": f"다음 기획안을 바탕으로 스토리를 써주세요:\n{brief}"}
         ]
     )
-    print("\n=== 🚨 서버 응답 확인 🚨 ===")
-    print(response)
-    print("==========================\n")
     return response.choices[0].message.content
 
 def generate_color_palette(brief):
@@ -323,8 +319,6 @@ def generate_color_palette(brief):
     입력: brief (딕셔너리)
     출력: 컬러 팔레트 딕셔너리
     """
-    print("\n[2/5] 브랜드 컬러 팔레트 생성 중...")
-    
     # 우리가 팀에서 확정한 컬러 팔레트를 그대로 반환
     return {
         "main": "#87A96B",              # 세이지 그린
