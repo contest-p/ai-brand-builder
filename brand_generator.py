@@ -10,6 +10,8 @@ brand_generator.py
 import json  # JSON 파일을 읽고, 결과를 JSON으로 저장할 때 사용
 import os  # 환경변수(API 키)와 파일 경로를 다룰 때 사용
 import sys  # 프로그램 종료(sys.exit)에 사용
+import base64  # 이미지 생성 API가 돌려주는 b64_json을 실제 이미지 파일로 바꿀 때 사용
+import requests  # 이미지 생성 API에 직접 HTTP 요청을 보낼 때 사용
 from pathlib import Path  # 폴더/파일 경로를 다루기 쉽게 해주는 도구
 import openai
 import matplotlib.pyplot as plt  # 컬러 팔레트를 이미지로 그릴 때 사용
@@ -519,12 +521,106 @@ def generate_logo(brief, naming_result, color_result):
     """
     입력:
       - brief: 브리프 딕셔너리
-      - naming_result: generate_naming()이 만든 이름 후보 리스트
-      - color_result: generate_color_palette()가 만든 색상 딕셔너리
+      - naming_result: generate_naming()이 만든 이름 후보 리스트 (None일 수 있음)
+      - color_result: generate_color_palette()가 만든 색상 딕셔너리 (None일 수 있음)
     출력: 저장된 로고 이미지 파일 경로 리스트
-          예) ["./output/logo_1.png", "./output/logo_2.png"]
+          예) ["./output/logo_01.png", "./output/logo_02.png"]
+
+    코디세이(codyssey) 이미지 생성 프록시를 사용한다.
+    .env에 있는 IMAGE_API_BASE_URL(예: https://copa.codyssey.kr)에
+    "/api/v1/images" 경로를 붙여서 요청을 보낸다.
+    키는 IMAGE_API_KEY가 따로 있으면 그걸 쓰고, 없으면 OPENAI_API_KEY를
+    그대로 재사용한다 (텍스트/이미지가 같은 가상 키인 경우가 많기 때문).
     """
-    pass
+    # 1) 브랜드명 결정 (naming_result가 없거나 비어있으면 기본 문구 사용)
+    if naming_result:
+        brand_name = naming_result[0].get("name", "브랜드")
+    else:
+        brand_name = None  # 이름이 없으면 "미니멀한 로고"로만 표현
+
+    # 2) 메인 컬러 + 서브 컬러 결정 (color_result가 없으면 기본 회색만 사용)
+    if color_result and color_result.get("main"):
+        main_color = color_result["main"]
+        sub_colors = color_result.get("sub") or []
+    else:
+        main_color = "#CCCCCC"
+        sub_colors = []
+
+    industry = brief.get("industry", "브랜드")
+
+    # 3) 서로 다른 스타일의 로고 3개를 요청할 프롬프트 목록 만들기
+    if brand_name:
+        base_desc = f"'{brand_name}'라는 이름의 {industry} 브랜드를 위한 로고"
+    else:
+        base_desc = f"{industry} 브랜드를 위한 미니멀한 로고"
+
+    # 서브 컬러가 있으면 "보조 색상으로 ... 사용" 문구를 만들어 붙인다
+    if sub_colors:
+        sub_color_text = f", 보조 색상으로 {', '.join(sub_colors)}도 함께 사용"
+    else:
+        sub_color_text = ""
+
+    style_prompts = [
+        f"{base_desc}, 텍스트(로고타입) 위주 디자인, 메인 컬러는 {main_color}{sub_color_text}, "
+        f"깔끔한 산세리프 폰트, 흰색 배경, 미니멀 스타일",
+        f"{base_desc}, 브랜드명 글자 없이 심볼/아이콘 위주 디자인, "
+        f"메인 컬러는 {main_color}{sub_color_text}, 흰색 배경, 미니멀 플랫 디자인",
+        f"{base_desc}, 아이콘 심볼과 브랜드명 텍스트를 함께 배치한 조합형 디자인, "
+        f"메인 컬러는 {main_color}{sub_color_text}, 흰색 배경, 미니멀 스타일",
+    ]
+
+    # 4) 이미지 API 키/주소 준비
+    api_key = os.environ.get("IMAGE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("IMAGE_API_BASE_URL", "https://copa.codyssey.kr")
+
+    if not api_key:
+        print("이미지 생성용 API 키가 없습니다. .env를 확인해주세요.")
+        return []
+
+    image_url = f"{base_url}/api/v1/images"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    # 5) 저장 폴더 준비
+    output_path = Path("./output")
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    saved_paths = []
+
+    # 6) 스타일별로 하나씩 요청 (하나가 실패해도 나머지는 계속 진행)
+    for index, prompt in enumerate(style_prompts, start=1):
+        try:
+            response = requests.post(
+                image_url,
+                headers=headers,
+                json={
+                    "model": "gpt-image-1-mini",
+                    "prompt": prompt,
+                    "size": "1024x1024",
+                    # b64_json으로 받아야 API 키만으로 이미지를 직접 내려받을 수 있다
+                    "response_format": "b64_json",
+                },
+                timeout=60,
+            )
+            response.raise_for_status()  # 상태코드가 200번대가 아니면 에러 발생시킴
+
+            result = response.json()
+            b64_image = result["result"]["images"][0]["b64_json"]
+
+            file_name = f"logo_{index:02d}.png"
+            file_path = output_path / file_name
+
+            with open(file_path, "wb") as f:
+                f.write(base64.b64decode(b64_image))
+
+            saved_paths.append(str(file_path))
+            print(f"  → {file_name} 저장 완료")
+
+        except Exception as error:
+            print(f"  → 로고 시안 {index}번 생성 중 오류가 발생했습니다: {error}")
+            print(f"  → {index}번 시안은 건너뛰고 계속 진행합니다.")
+            continue
+
+    return saved_paths
 
 
 # ---------------------------------------------------------------------------
