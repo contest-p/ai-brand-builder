@@ -10,6 +10,7 @@ brand_generator.py
 import json  # JSON 파일을 읽고, 결과를 JSON으로 저장할 때 사용
 import os  # 환경변수(API 키)와 파일 경로를 다룰 때 사용
 import sys  # 프로그램 종료(sys.exit)에 사용
+import re  # HEX 컬러 코드(#RRGGBB) 형식이 맞는지 검사할 때 사용
 import base64  # 이미지 생성 API가 돌려주는 b64_json을 실제 이미지 파일로 바꿀 때 사용
 import requests  # 이미지 생성 API에 직접 HTTP 요청을 보낼 때 사용
 from pathlib import Path  # 폴더/파일 경로를 다루기 쉽게 해주는 도구
@@ -417,16 +418,81 @@ def generate_story(brief):
     return response.choices[0].message.content
 
 
+_HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def _is_valid_hex(value):
+    """'#87A96B' 처럼 '#' + 6자리 16진수인지 확인한다."""
+    return isinstance(value, str) and bool(_HEX_COLOR_PATTERN.match(value))
+
+
 def generate_color_palette(brief):
     """
     입력: brief (딕셔너리)
-    출력: 컬러 팔레트 딕셔너리
+    출력: 컬러 팔레트 딕셔너리 {"main": "#HEX", "sub": ["#HEX", "#HEX"]}
+
+    brief의 industry/target/keywords/tone을 바탕으로 매번 새로
+    컬러를 추천받는다. brief가 바뀌면 결과 컬러도 바뀐다.
+    응답이 이상하거나 API 호출이 실패하면 기본 회색 팔레트를 반환한다.
     """
-    # 우리가 팀에서 확정한 컬러 팔레트를 그대로 반환
-    return {
-        "main": "#87A96B",              # 세이지 그린
-        "sub": ["#F5F5DC", "#A9D1E1"]   # 웜 베이지, 미스트 블루
-    }
+    fallback = {"main": "#CCCCCC", "sub": ["#EEEEEE", "#F5F5F5"]}
+
+    client = openai.OpenAI()
+
+    industry = brief.get("industry", "")
+    target = brief.get("target", "")
+    keywords = brief.get("keywords", [])
+    tone = brief.get("tone", "")
+
+    system_prompt = (
+        "당신은 전문 브랜드 컬러 컨설턴트입니다. "
+        "주어진 브랜드 정보에 어울리는 메인 컬러 1개와 서브 컬러 2~3개를 "
+        "HEX 코드로 추천해주세요. "
+        "다른 설명, 인사말, 코드블록 표시 없이 아래 JSON 형식으로만 답하세요.\n"
+        '{"main": "#RRGGBB", "sub": ["#RRGGBB", "#RRGGBB"]}'
+    )
+
+    user_prompt = f"업종: {industry}\n타겟: {target}\n키워드: {', '.join(keywords)}"
+    if tone:
+        user_prompt += f"\n톤앤매너: {tone}"
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-5.4-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+
+        content = _strip_code_fence(response.choices[0].message.content)
+        color_dict = json.loads(content)
+
+        if not isinstance(color_dict, dict):
+            print("컬러 팔레트 응답이 딕셔너리 형식이 아닙니다. 기본 컬러를 사용합니다.")
+            return fallback
+
+        main_color = color_dict.get("main")
+        sub_colors = color_dict.get("sub", [])
+
+        # main이 없거나 HEX 형식이 아니면 기본값으로 대체
+        if not _is_valid_hex(main_color):
+            print("메인 컬러가 올바른 HEX 형식이 아닙니다. 기본 컬러를 사용합니다.")
+            return fallback
+
+        # sub 중 HEX 형식이 아닌 값은 걸러낸다
+        valid_sub_colors = [c for c in sub_colors if _is_valid_hex(c)]
+        if not valid_sub_colors:
+            valid_sub_colors = fallback["sub"]
+
+        return {"main": main_color, "sub": valid_sub_colors}
+
+    except json.JSONDecodeError:
+        print("컬러 팔레트 응답이 올바른 JSON 형식이 아닙니다. 기본 컬러를 사용합니다.")
+        return fallback
+    except Exception as error:
+        print(f"컬러 팔레트 생성 중 오류가 발생했습니다: {error}")
+        return fallback
 
 
 def save_color_palette_image(color_dict, output_dir):
@@ -554,19 +620,24 @@ def generate_logo(brief, naming_result, color_result):
     else:
         base_desc = f"{industry} 브랜드를 위한 미니멀한 로고"
 
-    # 서브 컬러가 있으면 "보조 색상으로 ... 사용" 문구를 만들어 붙인다
+    # 서브 컬러가 있으면 3개 컬러를 확실히 다 쓰라고 강하게 지시하는 문구를 만든다
     if sub_colors:
-        sub_color_text = f", 보조 색상으로 {', '.join(sub_colors)}도 함께 사용"
+        all_colors_text = ", ".join([main_color] + list(sub_colors))
+        color_instruction = (
+            f"다음 {1 + len(sub_colors)}가지 색상을 반드시 모두 눈에 띄게 사용: "
+            f"{all_colors_text} (메인 컬러 {main_color}를 가장 넓은 면적에, "
+            f"나머지 색상들도 포인트나 배경 요소로 각각 확실히 보이도록 배치)"
+        )
     else:
-        sub_color_text = ""
+        color_instruction = f"메인 컬러 {main_color}를 사용"
 
     style_prompts = [
-        f"{base_desc}, 텍스트(로고타입) 위주 디자인, 메인 컬러는 {main_color}{sub_color_text}, "
+        f"{base_desc}, 텍스트(로고타입) 위주 디자인, {color_instruction}, "
         f"깔끔한 산세리프 폰트, 흰색 배경, 미니멀 스타일",
         f"{base_desc}, 브랜드명 글자 없이 심볼/아이콘 위주 디자인, "
-        f"메인 컬러는 {main_color}{sub_color_text}, 흰색 배경, 미니멀 플랫 디자인",
+        f"{color_instruction}, 흰색 배경, 미니멀 플랫 디자인",
         f"{base_desc}, 아이콘 심볼과 브랜드명 텍스트를 함께 배치한 조합형 디자인, "
-        f"메인 컬러는 {main_color}{sub_color_text}, 흰색 배경, 미니멀 스타일",
+        f"{color_instruction}, 흰색 배경, 미니멀 스타일",
     ]
 
     # 4) 이미지 API 키/주소 준비
@@ -593,7 +664,7 @@ def generate_logo(brief, naming_result, color_result):
                 image_url,
                 headers=headers,
                 json={
-                    "model": "gpt-image-1-mini",
+                    "model": "gpt-image-2",
                     "prompt": prompt,
                     "size": "1024x1024",
                     # b64_json으로 받아야 API 키만으로 이미지를 직접 내려받을 수 있다
