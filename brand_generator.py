@@ -8,11 +8,14 @@ import json  # JSON 파일을 읽고, 결과를 JSON으로 저장할 때 사용
 import os  # 환경변수(API 키)와 파일 경로를 다룰 때 사용
 import sys  # 프로그램 종료(sys.exit)에 사용
 import base64  # 이미지 생성 API가 돌려주는 b64_json을 실제 이미지 파일로 바꿀 때 사용
+import time  # API 재시도 전 대기 시간에 사용
+from datetime import datetime  # 에러 발생 시간을 기록할 때 사용
 import requests  # 이미지 생성 API에 직접 HTTP 요청을 보낼 때 사용
 from pathlib import Path  # 폴더/파일 경로를 다루기 쉽게 해주는 도구
 import openai
 import matplotlib.pyplot as plt  # 컬러 팔레트를 이미지로 그릴 때 사용
 import matplotlib.patches as patches  # 네모 박스(사각형)를 그릴 때 사용
+
 
 # ---------------------------------------------------------------------------
 # 1) .env 파일 확인 후 환경변수로 넣기
@@ -156,6 +159,22 @@ _STEP_NAME_BY_FUNC = {
     "generate_logo": "로고",
 }
 
+# 단계별 에러를 brand_result.json에 저장하기 위한 에러 기록 목록
+ERROR_HISTORY = []
+
+
+def _record_error(step, message):
+    """
+    단계별 오류를 결과 JSON에 저장하기 위해 기록합니다.
+    """
+    ERROR_HISTORY.append(
+        {
+            "step": step,
+            "message": str(message),
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+
 
 def _looks_like_api_key_error(error):
     """
@@ -169,7 +188,10 @@ def _looks_like_api_key_error(error):
         return True
 
     code = str(getattr(error, "code", "") or getattr(error, "type", "")).lower()
-    if "api_key" in code or "apikey" in code or code in ("invalid_api_key", "authentication_error"):
+    if "api_key" in code or "apikey" in code or code in (
+        "invalid_api_key",
+        "authentication_error",
+    ):
         return True
 
     class_name = type(error).__name__.lower()
@@ -287,30 +309,58 @@ def generate_naming(brief):
         '[{"name": "한글 브랜드명", "name_en": "영문 브랜드명", "meaning": "이름의 의미/유래 설명"}, ...]'
     )
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5.4-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": _brief_prompt_lines(brief)},
-            ],
-        )
+    user_prompt = _brief_prompt_lines(brief)
 
-        content = _strip_code_fence(response.choices[0].message.content)
-        naming_list = json.loads(content)
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.4-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
 
-        if not isinstance(naming_list, list):
-            print("네이밍 응답이 리스트 형식이 아닙니다.")
+            content = _strip_code_fence(response.choices[0].message.content)
+            naming_list = json.loads(content)
+
+            if not isinstance(naming_list, list):
+                raise ValueError("네이밍 응답이 리스트 형식이 아닙니다.")
+
+            if not 3 <= len(naming_list) <= 5:
+                raise ValueError("네이밍 후보는 3~5개여야 합니다.")
+
+            for item in naming_list:
+                if not isinstance(item, dict):
+                    raise ValueError("네이밍 후보 항목이 객체 형식이 아닙니다.")
+                if not item.get("name"):
+                    raise ValueError("네이밍 후보에 name 필드가 없습니다.")
+                if not item.get("name_en"):
+                    raise ValueError("네이밍 후보에 name_en 필드가 없습니다.")
+                if not item.get("meaning"):
+                    raise ValueError("네이밍 후보에 meaning 필드가 없습니다.")
+
+            return naming_list
+
+        except json.JSONDecodeError:
+            error_message = "네이밍 응답이 올바른 JSON 형식이 아닙니다."
+        except Exception as error:
+            error_message = str(error)
+
+        if attempt == 0:
+            print("네이밍 응답을 검증하지 못했습니다. 수정 요청 후 다시 생성합니다.")
+            user_prompt = (
+                _brief_prompt_lines(brief)
+                + "\n\n이전 응답에 문제가 있었습니다. "
+                "브랜드명 후보를 정확히 3~5개 생성하고, "
+                "각 항목에 name, name_en, meaning 필드를 모두 포함하여 "
+                "지정한 JSON 형식으로만 다시 답하세요."
+            )
+        else:
+            print(error_message)
             return []
 
-        return naming_list
-
-    except json.JSONDecodeError:
-        print("네이밍 응답이 올바른 JSON 형식이 아닙니다.")
-        return []
-    except Exception as error:
-        _report_error("네이밍", error)
-        return []
+    return []
 
 
 def generate_slogan(brief):
@@ -331,30 +381,48 @@ def generate_slogan(brief):
     if brief.get("tone"):
         user_prompt += " (반드시 이 톤앤매너를 반영해줘)"
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5.4-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.4-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
 
-        content = _strip_code_fence(response.choices[0].message.content)
-        slogan_list = json.loads(content)
+            content = _strip_code_fence(response.choices[0].message.content)
+            slogan_list = json.loads(content)
 
-        if not isinstance(slogan_list, list):
-            print("슬로건 응답이 리스트 형식이 아닙니다.")
+            if not isinstance(slogan_list, list):
+                raise ValueError("슬로건 응답이 리스트 형식이 아닙니다.")
+
+            if len(slogan_list) != 3:
+                raise ValueError("슬로건은 정확히 3개여야 합니다.")
+
+            if not all(isinstance(item, str) and item.strip() for item in slogan_list):
+                raise ValueError("슬로건은 비어 있지 않은 문자열이어야 합니다.")
+
+            return slogan_list
+
+        except json.JSONDecodeError:
+            error_message = "슬로건 응답이 올바른 JSON 형식이 아닙니다."
+        except Exception as error:
+            error_message = str(error)
+
+        if attempt == 0:
+            print("슬로건 응답을 검증하지 못했습니다. 수정 요청 후 다시 생성합니다.")
+            user_prompt = (
+                _brief_prompt_lines(brief)
+                + "\n\n이전 응답에 문제가 있었습니다. "
+                "슬로건을 정확히 3개 생성하고, "
+                "다른 설명 없이 JSON 배열 형식으로만 다시 답하세요."
+            )
+        else:
+            print(error_message)
             return []
 
-        return slogan_list
-
-    except json.JSONDecodeError:
-        print("슬로건 응답이 올바른 JSON 형식이 아닙니다.")
-        return []
-    except Exception as error:
-        _report_error("슬로건", error)
-        return []
+    return []
 
 
 def generate_story(brief):
@@ -376,19 +444,41 @@ def generate_story(brief):
         "다른 설명이나 인사말 없이 스토리 본문만 출력하세요."
     )
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5.4-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": _brief_prompt_lines(brief)},
-            ],
-        )
-        return response.choices[0].message.content.strip()
+    user_prompt = _brief_prompt_lines(brief)
 
-    except Exception as error:
-        _report_error("스토리", error)
-        return None
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.4-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+
+            story = response.choices[0].message.content.strip()
+
+            if not story:
+                raise ValueError("브랜드 스토리 응답이 비어 있습니다.")
+
+            return story
+
+        except Exception as error:
+            error_message = str(error)
+
+        if attempt == 0:
+            print("브랜드 스토리 응답을 검증하지 못했습니다. 수정 요청 후 다시 생성합니다.")
+            user_prompt = (
+                _brief_prompt_lines(brief)
+                + "\n\n이전 응답에 문제가 있었습니다. "
+                "업종, 타겟, 키워드, 톤앤매너를 반영한 브랜드 스토리를 "
+                "300자 내외로 다시 작성해주세요. 다른 설명 없이 본문만 출력하세요."
+            )
+        else:
+            _report_error("스토리", error)
+            return None
+
+    return None
 
 
 def generate_color_palette(brief):
@@ -410,34 +500,66 @@ def generate_color_palette(brief):
         '{"main": "#RRGGBB", "sub": ["#RRGGBB", "#RRGGBB"]}'
     )
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5.4-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": _brief_prompt_lines(brief)},
-            ],
-        )
+    user_prompt = _brief_prompt_lines(brief)
 
-        content = _strip_code_fence(response.choices[0].message.content)
-        color_dict = json.loads(content)
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.4-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
 
-        if not isinstance(color_dict, dict) or not color_dict.get("main"):
-            print("컬러 팔레트 응답 형식이 올바르지 않습니다.")
+            content = _strip_code_fence(response.choices[0].message.content)
+            color_dict = json.loads(content)
+
+            if not isinstance(color_dict, dict) or not color_dict.get("main"):
+                raise ValueError("컬러 팔레트 응답 형식이 올바르지 않습니다.")
+
+            if not isinstance(color_dict.get("sub"), list):
+                raise ValueError("컬러 팔레트의 sub가 리스트 형식이 아닙니다.")
+
+            if not 2 <= len(color_dict["sub"]) <= 3:
+                raise ValueError("서브 컬러는 2~3개여야 합니다.")
+
+            hex_pattern = r"^#[0-9A-Fa-f]{6}$"
+
+            import re
+
+            if not isinstance(color_dict["main"], str) or not re.fullmatch(
+                hex_pattern, color_dict["main"]
+            ):
+                raise ValueError("메인 컬러 HEX 형식이 올바르지 않습니다.")
+
+            if not all(
+                isinstance(color, str) and re.fullmatch(hex_pattern, color)
+                for color in color_dict["sub"]
+            ):
+                raise ValueError("서브 컬러 HEX 형식이 올바르지 않습니다.")
+
+            return color_dict
+
+        except json.JSONDecodeError:
+            error_message = "컬러 팔레트 응답이 올바른 JSON 형식이 아닙니다."
+        except Exception as error:
+            error_message = str(error)
+
+        if attempt == 0:
+            print("컬러 팔레트 응답을 검증하지 못했습니다. 수정 요청 후 다시 생성합니다.")
+            user_prompt = (
+                _brief_prompt_lines(brief)
+                + "\n\n이전 응답에 문제가 있었습니다. "
+                "main에는 정확한 #RRGGBB 형식의 HEX 코드 1개, "
+                "sub에는 정확한 #RRGGBB 형식의 HEX 코드 2~3개를 넣어 "
+                "지정된 JSON 형식으로만 다시 답하세요."
+            )
+        else:
+            print(error_message)
             return None
 
-        # sub가 없거나 리스트가 아니면 빈 리스트로 정리
-        if not isinstance(color_dict.get("sub"), list):
-            color_dict["sub"] = []
-
-        return color_dict
-
-    except json.JSONDecodeError:
-        print("컬러 팔레트 응답이 올바른 JSON 형식이 아닙니다.")
-        return None
-    except Exception as error:
-        _report_error("컬러", error)
-        return None
+    return None
 
 
 def save_color_palette_image(color_dict, output_dir):
@@ -560,6 +682,7 @@ def generate_logo(brief, naming_result, color_result, output_dir):
 
     if not api_key:
         print("이미지 생성용 API 키가 없습니다. .env를 확인해주세요.")
+        _record_error("로고", "이미지 생성용 API 키가 없습니다.")
         return []
 
     image_url = f"{base_url}/api/v1/images"
@@ -572,39 +695,59 @@ def generate_logo(brief, naming_result, color_result, output_dir):
     saved_paths = []
 
     for index, prompt in enumerate(style_prompts, start=1):
-        try:
-            response = requests.post(
-                image_url,
-                headers=headers,
-                json={
-                    "model": "gpt-image-1-mini",
-                    "prompt": prompt,
-                    "size": "1024x1024",
-                    "response_format": "b64_json",
-                },
-                timeout=60,
-            )
-            response.raise_for_status()
+        success = False
 
-            result = response.json()
-            b64_image = result["result"]["images"][0]["b64_json"]
+        for attempt in range(1, 4):
+            try:
+                response = requests.post(
+                    image_url,
+                    headers=headers,
+                    json={
+                        "model": "gpt-image-1-mini",
+                        "prompt": prompt,
+                        "size": "1024x1024",
+                        "response_format": "b64_json",
+                    },
+                    timeout=60,
+                )
+                response.raise_for_status()
 
-            file_name = f"logo_{index:02d}.png"
-            file_path = output_path / file_name
+                result = response.json()
+                b64_image = result["result"]["images"][0]["b64_json"]
 
-            with open(file_path, "wb") as f:
-                f.write(base64.b64decode(b64_image))
+                file_name = f"logo_{index:02d}.png"
+                file_path = output_path / file_name
 
-            saved_paths.append(str(file_path))
-            print(f"  → {file_name} 저장 완료")
+                with open(file_path, "wb") as f:
+                    f.write(base64.b64decode(b64_image))
 
-        except Exception as error:
-            if _looks_like_api_key_error(error):
-                print(f"  → 로고 시안 {index}번: API 키를 확인해주세요")
-            else:
-                print(f"  → 로고 시안 {index}번 생성 중 오류가 발생했습니다: {error}")
+                saved_paths.append(str(file_path))
+                print(f"  → {file_name} 저장 완료")
+                success = True
+                break
+
+            except Exception as error:
+                if _looks_like_api_key_error(error):
+                    print(f"  → 로고 시안 {index}번: API 키를 확인해주세요")
+                else:
+                    print(
+                        f"  → 로고 시안 {index}번 생성 중 오류가 발생했습니다: {error}"
+                    )
+
+                if attempt < 3:
+                    wait_seconds = 2 ** (attempt - 1)
+                    print(
+                        f"  → {wait_seconds}초 후 {attempt + 1}번째 시도를 진행합니다."
+                    )
+                    time.sleep(wait_seconds)
+                else:
+                    _record_error(
+                        f"로고 시안 {index}번",
+                        str(error),
+                    )
+
+        if not success:
             print(f"  → {index}번 시안은 건너뛰고 계속 진행합니다.")
-            continue
 
     return saved_paths
 
@@ -615,16 +758,52 @@ def generate_logo(brief, naming_result, color_result, output_dir):
 def run_step(step_number, total_steps, title, func, *args):
     print(f"[{step_number}/{total_steps}] {title} 생성 중...")
 
-    try:
-        result = func(*args)
-        return result
-    except Exception as error:
-        if _looks_like_api_key_error(error):
-            print("  → API 키를 확인해주세요")
-        else:
-            print(f"  → {title} 단계에서 오류가 났습니다: {error}")
-        print("  → 이 단계는 건너뛰고 다음 단계로 진행합니다.")
-        return None
+    # API/단계 실패 시 최대 3회 재시도
+    for attempt in range(1, 4):
+        try:
+            result = func(*args)
+
+            # 각 생성 함수의 실패 반환값을 확인해서 재시도
+            failed = (
+                result is None
+                or (isinstance(result, list) and len(result) == 0)
+            )
+
+            if not failed:
+                return result
+
+            if attempt < 3:
+                wait_seconds = 2 ** (attempt - 1)
+                print(
+                    f"  → {title} 결과 생성에 실패했습니다. "
+                    f"{wait_seconds}초 후 재시도합니다. "
+                    f"({attempt + 1}/3)"
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            _record_error(title, f"{title} 단계가 3회 시도 후 실패했습니다.")
+            print(f"  → {title} 단계는 건너뛰고 다음 단계로 진행합니다.")
+            return None
+
+        except Exception as error:
+            if _looks_like_api_key_error(error):
+                print("  → API 키를 확인해주세요")
+            else:
+                print(f"  → {title} 단계에서 오류가 났습니다: {error}")
+
+            if attempt < 3:
+                wait_seconds = 2 ** (attempt - 1)
+                print(
+                    f"  → {wait_seconds}초 후 {attempt + 1}번째 시도를 진행합니다."
+                )
+                time.sleep(wait_seconds)
+            else:
+                _record_error(title, str(error))
+                print("  → 이 단계는 건너뛰고 다음 단계로 진행합니다.")
+                return None
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +826,11 @@ def save_result(output_dir, result_dict):
 # 7) 프로그램 시작점
 # ---------------------------------------------------------------------------
 def main():
+    global ERROR_HISTORY
+
+    # 이전 실행의 에러 기록이 남지 않도록 초기화
+    ERROR_HISTORY = []
+
     get_api_key()
 
     brief_path, output_dir = ask_paths()
@@ -685,6 +869,7 @@ def main():
         "color_palette": color_result,
         "color_palette_image": color_palette_image_path,
         "logo_paths": logo_result,
+        "errors": ERROR_HISTORY,
     }
 
     save_result(output_dir, results)
