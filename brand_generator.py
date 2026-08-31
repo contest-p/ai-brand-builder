@@ -278,17 +278,73 @@ def safe_api_call(func, *args, step_name=None, **kwargs):
 # 4) 5단계 생성 함수 (지금은 뼈대만 — 내용은 나중에 채움)
 #    구현할 때: 실제 API 호출을 safe_api_call(...) 로 감싸면 된다
 # ---------------------------------------------------------------------------
+def _strip_code_fence(text):
+    """
+    AI 응답이 ```json ... ``` 처럼 코드블록으로 감싸져 오는 경우가 있어서,
+    앞뒤의 ``` 표시를 제거하고 순수 JSON 텍스트만 남긴다.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        # 첫 줄(```json 또는 ```)과 마지막 줄(```)을 제거
+        lines = text.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
+
+
 def generate_naming(brief):
     """
     입력: brief (딕셔너리) — industry, target, keywords 등
     출력: 브랜드명 후보 리스트
           각 항목은 이름과 의미를 담은 딕셔너리
           예) [{"name": "루나", "meaning": "달처럼 부드러운 이미지"}, ...]
-
-    구현 예)
-        return safe_api_call(_call_naming_api, brief, step_name="네이밍")
+    실패 시(응답 형식이 이상하거나 API 호출 자체가 실패하면) 빈 리스트를 반환한다.
     """
-    pass
+    client = openai.OpenAI()
+
+    industry = brief.get("industry", "")
+    target = brief.get("target", "")
+    keywords = brief.get("keywords", [])
+    tone = brief.get("tone", "")
+
+    system_prompt = (
+        "당신은 전문 브랜드 네이밍 컨설턴트입니다. "
+        "주어진 브랜드 정보를 바탕으로 브랜드명 후보 3~5개와 각 이름의 의미/유래를 만들어주세요. "
+        "다른 설명, 인사말, 코드블록 표시 없이 아래 JSON 형식으로만 답하세요.\n"
+        '[{"name": "브랜드명", "meaning": "이름의 의미/유래 설명"}, ...]'
+    )
+
+    user_prompt = f"업종: {industry}\n타겟: {target}\n키워드: {', '.join(keywords)}"
+    if tone:
+        user_prompt += f"\n톤앤매너: {tone}"
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-5.4-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+
+        content = _strip_code_fence(response.choices[0].message.content)
+        naming_list = json.loads(content)
+
+        if not isinstance(naming_list, list):
+            print("네이밍 응답이 리스트 형식이 아닙니다.")
+            return []
+
+        return naming_list
+
+    except json.JSONDecodeError:
+        print("네이밍 응답이 올바른 JSON 형식이 아닙니다.")
+        return []
+    except Exception as error:
+        print(f"네이밍 생성 중 오류가 발생했습니다: {error}")
+        return []
 
 
 def generate_slogan(brief):
@@ -296,8 +352,50 @@ def generate_slogan(brief):
     입력: brief (딕셔너리)
     출력: 슬로건 문자열 리스트
           예) ["매일의 작은 빛", "당신 곁의 브랜드"]
+    실패 시(응답 형식이 이상하거나 API 호출 자체가 실패하면) 빈 리스트를 반환한다.
     """
-    pass
+    client = openai.OpenAI()
+
+    industry = brief.get("industry", "")
+    target = brief.get("target", "")
+    keywords = brief.get("keywords", [])
+    tone = brief.get("tone", "")
+
+    system_prompt = (
+        "당신은 전문 카피라이터입니다. "
+        "주어진 브랜드 정보를 바탕으로 슬로건/태그라인 3개를 만들어주세요. "
+        "다른 설명, 인사말, 코드블록 표시 없이 아래 JSON 형식으로만 답하세요.\n"
+        '["슬로건1", "슬로건2", "슬로건3"]'
+    )
+
+    user_prompt = f"업종: {industry}\n타겟: {target}\n키워드: {', '.join(keywords)}"
+    if tone:
+        user_prompt += f"\n톤앤매너: {tone} (반드시 이 톤앤매너를 반영해줘)"
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-5.4-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+
+        content = _strip_code_fence(response.choices[0].message.content)
+        slogan_list = json.loads(content)
+
+        if not isinstance(slogan_list, list):
+            print("슬로건 응답이 리스트 형식이 아닙니다.")
+            return []
+
+        return slogan_list
+
+    except json.JSONDecodeError:
+        print("슬로건 응답이 올바른 JSON 형식이 아닙니다.")
+        return []
+    except Exception as error:
+        print(f"슬로건 생성 중 오류가 발생했습니다: {error}")
+        return []
 
 
 def generate_story(brief):
